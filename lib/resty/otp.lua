@@ -1,24 +1,41 @@
--- load comment libs
-local require = require
 
--- local function
-local ngx            = ngx
-local ngx_hmac_sha1  = ngx.hmac_sha1
-local ngx_time       = ngx.time
-local bit_band       = bit.band
-local bit_lshift     = bit.lshift
-local bit_rshift     = bit.rshift
-local math_floor     = math.floor
-local math_random    = math.random
-local string_char    = string.char
-local string_format  = string.format
-local string_reverse = string.reverse
-local table_concat   = table.concat
-local table_insert   = table.insert
-local table_unpack   = table.unpack or unpack  -- 5.1 compatibility
+-- lua-resty-otp - Lua OTP lib for OpenResty
+-- https://github.com/leslie-tsang/lua-resty-otp
 
+-- 加密与安全：动态密码图解：HOTP 与 TOTP 算法
+-- https://blog.csdn.net/liwei16611/article/details/90547933
 
-local BASE32_HASH = {
+-- 动态令牌是怎么生成的？（OTP & TOTP 简单介绍）
+-- https://zhuanlan.zhihu.com/p/484991482
+
+-- 阮一峰 - 双因素认证（2FA）教程
+-- https://ruanyifeng.com/blog/2017/11/2fa-tutorial.html
+
+local hmac_sha1         = ngx.hmac_sha1
+local escape_uri        = ngx.escape_uri
+local ngx_now           = ngx.now
+local ngx_time          = ngx.time
+local bit_band          = bit.band
+local bit_lshift        = bit.lshift
+local bit_rshift        = bit.rshift
+local math_floor        = math.floor
+local math_random       = math.random
+local math_randomseed   = math.randomseed
+local str_byte          = string.byte
+local str_char          = string.char
+local str_format        = string.format
+local str_reverse       = string.reverse
+local str_upper         = string.upper
+local tbl_new           = table.new
+local tbl_clear         = table.clear
+local tbl_insert        = table.insert
+local tbl_concat        = table.concat
+local tbl_unpack        = table.unpack or unpack  -- 5.1 compatibility
+
+local _M = { _VERSION = '1.0.0' }
+local mt = { __index = _M       }
+
+local BASE32_HASH = {  --> number[]
     [0 ] = 65, [1 ] = 66, [2 ] = 67, [3 ] = 68, [4 ] = 69, [5 ] = 70,
     [6 ] = 71, [7 ] = 72, [8 ] = 73, [9 ] = 74, [10] = 75, [11] = 76,
     [12] = 77, [13] = 78, [14] = 79, [15] = 80, [16] = 81, [17] = 82,
@@ -34,164 +51,197 @@ local BASE32_HASH = {
     [89] = 24, [90] = 25,
 }
 
--- module define
-local _M = {
-    _VERSION = '0.01.01',
-}
+local t_base32 = tbl_new(10, 0)  --> number[]
 
+-- base32 解码
+local function base32_decode(str)
+-- @str     : string
+-- @return  : string
 
-local function base32_decode(secret_str)
-    local secret_token = {secret_str:byte(1, -1)}
-    local secret_token_base32 = {}
+    tbl_clear(t_base32)
 
-    local n = 0
-    local bs = 0
+    local n, bs = 0, 0
 
-    for i, v in ipairs(secret_token) do
+    for i = 1, #str do
+        local v = str_byte(str, i)
         n = bit_lshift(n, 5)
         n = n + BASE32_HASH[v]
         bs = (bs + 5) % 8
         if (bs < 5) then
-            secret_token_base32[#secret_token_base32 + 1] = bit_rshift(bit_band(n, bit_lshift(0xFF, bs)), bs)
+            tbl_insert(t_base32, bit_rshift(bit_band(n, bit_lshift(0xFF, bs)), bs))
         end
     end
 
-    return string_char(table_unpack(secret_token_base32))
+    return str_char(tbl_unpack(t_base32))
 end
 
+-- base32 编码
+local function base32_encode(str)
+-- @str     : string
+-- @return  : string
 
-local function base32_encode(secret_str)
-    local secret_token = {secret_str:byte(1, -1)}
-    local secret_token_base32 = {}
-    local tmp_char = 0
+    tbl_clear(t_base32)
 
-    local c = 0
-    local n = 0
-    local tmp_n = 0
-    local bs = 0
+    local c, n = 0, 0
 
-    for i, v in ipairs(secret_token) do
+    for i = 1, #str do
+        local v = str_byte(str, i)
+
         n = bit_lshift(n, 8)
         n = n + v
         c = c + 8
-        bs = c % 5
-        tmp_n = bit_rshift(n, bs)
+
+        local bs = c % 5
+        local tmp_n = bit_rshift(n, bs)
 
         for j = c - bs - 5, 0, -5 do
-            tmp_char = bit_rshift(bit_band(tmp_n, bit_lshift(0x1F, j)), j)
-            secret_token_base32[#secret_token_base32 + 1] = BASE32_HASH[tmp_char]
+            local tmp_char = bit_rshift(bit_band(tmp_n, bit_lshift(0x1F, j)), j)
+            tbl_insert(t_base32, BASE32_HASH[tmp_char])
         end
 
         c = bs
         n = bit_band(n, bit_rshift(0xFF, 8 - bs))
     end
 
-    return string_char(table_unpack(secret_token_base32))
+    return str_char(tbl_unpack(t_base32))
 end
 
+local t_time = tbl_new(8, 0)  --> number[]
 
-local function percent_encode_char(c)
-    return string_format("%%%02X", c:byte())
-end
-
-
-local function url_encode(str)
-    local r = str:gsub("[^a-zA-Z0-9.~_-]", percent_encode_char)
-    return r
-end
-
-
-local function totp_time_calc(ngx_time)
-    local ngx_time_str = {}
+local function totp_time_calc(time)
+-- @time    : number
+-- @return  : string
 
     for i = 1, 8 do
-        table_insert(ngx_time_str, bit_band(ngx_time, 0xFF))
-        ngx_time = bit_rshift(ngx_time, 8)
+        t_time[i] = bit_band(time, 0xFF)
+        time = bit_rshift(time, 8)
     end
 
-    return string_reverse(string_char(table_unpack(ngx_time_str)))
+    return str_reverse(str_char(tbl_unpack(t_time)))
 end
 
+local t_key = tbl_new(10, 0)  --> string[]
 
+-- 生成秘钥
 local function totp_new_key()
-    local tmp_k = ""
-    math.randomseed(ngx.time())
+-- @return  : string
+
+    math_randomseed(ngx_now() * 1000)
+
     for i = 1, 10 do
-        tmp_k = tmp_k .. string_char(math_random(0, 255))
+        t_key[i] = str_char(math_random(0, 255))
     end
-    return base32_encode(tmp_k)
+
+    return base32_encode(tbl_concat(t_key))
 end
 
-
------- TOTP functions ------
-local TOTP_MT = {}
-
-
-function _M.totp_init(secret_key)
-    local m = {
-        type = "totp",
+-- 创建对象
+function _M.new(key)
+-- @key ? : string
+    key = key and str_upper(key) or totp_new_key()
+    local t = {
+        type        = "totp",
+        key         = key,
+        key_decoded = base32_decode(key),
     }
-    setmetatable(m, { __index = TOTP_MT, __tostring = TOTP_MT.serialize })
-    m:new_key(secret_key)
-    return m
+    return setmetatable(t, mt)
 end
 
-
-function TOTP_MT:new_key(secret_key)
-    self.key = secret_key or totp_new_key()
-    self.key_decoded = base32_decode(self.key)
+-- 创建秘钥
+function _M:new_key(key)
+-- @key   ? : string
+-- @return  : void
+    key = key and str_upper(key) or totp_new_key()
+    self.key = key
+    self.key_decoded = base32_decode(key)
 end
 
+-- 计算令牌
+function _M:calc_token(time)
+-- @time  ? : number
+-- @return  : string
 
-function TOTP_MT:calc_token(var_time)
-    local ngx_time = math_floor(var_time / 30)
-    local HMAC_buffer = {ngx_hmac_sha1(self.key_decoded, totp_time_calc(ngx_time)):byte(1, -1)}
+    time = time or ngx_time()
+    time = math_floor(time / 30)
 
-    local HMAC_offset = bit_band(HMAC_buffer[20], 0xF)
-    local TOTP_token = 0
+    local digest = hmac_sha1(self.key_decoded, totp_time_calc(time))
+    local buffer = { str_byte(digest, 1, -1) }
+    local offset = bit_band(buffer[20], 0xF)
+    local token  = 0
 
     for i = 1, 4 do
-        TOTP_token = TOTP_token + bit_lshift(HMAC_buffer[HMAC_offset + i], (4 - i) * 8 )
+        token = token + bit_lshift(buffer[offset + i], (4 - i) * 8)
     end
 
-    TOTP_token = bit_band(TOTP_token, 0x7FFFFFFF)
-    TOTP_token = TOTP_token % 1000000
-    return string_format("%06d", TOTP_token)
+    token = bit_band(token, 0x7FFFFFFF)
+    token = token % 1000000
+
+    return str_format("%06d", token)
 end
 
-
-function TOTP_MT:verify_token(token)
-    return (token == self:calc_token(ngx_time()))
+-- 验证令牌
+function _M:verify_token(token)
+-- @token   : string    // 待验证的令牌
+-- @return  : boolean
+    return token == self:calc_token()
 end
 
+-- 生成链接
+function _M:get_url(issuer, account)
+-- @issuer  : string    // 发行方
+-- @account : string    // 账户名
+-- @return  : string
 
-function TOTP_MT:get_url(issuer, account)
-    return table_concat{
-        "otpauth://totp/",
-        account,
+    return tbl_concat {
+        "otpauth://totp/", account,
         "?secret=", self.key,
         "&issuer=", issuer,
     }
 end
 
+-- 生成链接二维码
+function _M:get_qr_url(issuer, account)
+-- @issuer  : string    // 发行方
+-- @account : string    // 账户名
+-- @return  : string
 
-function TOTP_MT:get_qr_url(issuer, account)
-    return table_concat{
+    return tbl_concat {
         "https://chart.googleapis.com/chart",
         "?chs=", "200x200",
         "&cht=qr",
         "&chl=200x200",
         "&chld=M|0",
-        "&chl=", url_encode(self:get_url(issuer, account)),
+        "&chl=", escape_uri(self:get_url(issuer, account)),
     }
 end
 
-function TOTP_MT:serialize()
-    return table_concat{
-        "type:totp\n",
-        "secret:", self.key,
-        "secret_decoded", self.key_decoded,
-    }
+-- 测试
+_M._TESTING = function()
+
+    -- 在线测试
+    -- https://moyuscript.github.io/2fa-test/
+    -- otpauth://totp/Passkou?secret=6shyg3uens2sh5slhey3dmh47skvgq5y&issuer=Test
+
+    local key = "6shyg3uens2sh5slhey3dmh47skvgq5y"
+    local otp = _M.new(key)
+
+    ngx.say("now   : ", ngx.now())
+    ngx.say("token : ", otp:calc_token())
+    ngx.say("url   : ", otp:get_url("Test", "Passkou"))
+    ngx.say("token : ", otp:calc_token())
+
+    ngx.update_time()
+    local t1 = ngx.now() * 1000
+
+    for _=1, 10000 do
+        otp:calc_token()
+    end
+
+    ngx.update_time()
+    local t2 = ngx.now() * 1000
+
+    ngx.say("time  : ", t2-t1, " ms / 10000")
+
 end
 
 return _M
