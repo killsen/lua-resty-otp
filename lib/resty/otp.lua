@@ -32,7 +32,7 @@ local tbl_insert        = table.insert
 local tbl_concat        = table.concat
 local tbl_unpack        = table.unpack or unpack  -- 5.1 compatibility
 
-local _M = { _VERSION = '1.0.0' }
+local _M = { _VERSION = '1.0.1' }
 local mt = { __index = _M       }
 
 local BASE32_HASH = {  --> number[]
@@ -120,7 +120,7 @@ local function totp_time_calc(time)
     return str_reverse(str_char(tbl_unpack(t_time)))
 end
 
-local t_key = tbl_new(10, 0)  --> string[]
+local t_key = tbl_new(20, 0)  --> string[]
 
 -- 生成秘钥
 local function totp_new_key()
@@ -128,7 +128,7 @@ local function totp_new_key()
 
     math_randomseed(ngx_now() * 1000)
 
-    for i = 1, 10 do
+    for i = 1, 20 do
         t_key[i] = str_char(math_random(0, 255))
     end
 
